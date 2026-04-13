@@ -66,32 +66,32 @@ jobs:
           echo "$REPORT_CONTENT" >> $GITHUB_ENV
           echo "$EOF" >> $GITHUB_ENV
 
-      # 4. Creation of payload
+      # 4. Create payload
       - name: Send data to backend
         env:
-          #gh secrets used to hide endpoint and pipeline tkn (used to verify validity of request)
           WEBHOOK_URL: ${{ secrets.AI_WEBHOOK_URL }}
           WEBHOOK_TOKEN: ${{ secrets.AI_WEBHOOK_SECRET }}
         run: |
-          # Create a temporary json file
+          # Generiamo il JSON
+          # 'project_name' viene preso dal nome della repository (es. "user/repo-name")
+          # 'risk_score' viene mockato a "Pending" o un valore casuale per ora
           jq -n \
-            --arg repo "${{ github.repository }}" \
-            --arg tag "${{ github.event.release.tag_name }}" \
+            --arg project "${{ github.repository }}" \
+            --arg tag "${{ github.event.release.tag_name || 'manual-trigger' }}" \
             --arg author "${{ github.actor }}" \
-            --arg body "${{ github.event.release.body }}" \
             --arg commits "$COMMITS" \
             --arg security "$SECURITY_REPORT" \
             '{
-              repository: $repo,
-              release_tag: $tag,
+              project_name: $project,
+              risk_score: "Medium",
               author: $author,
-              release_notes_draft: $body,
+              release_tag: $tag,
               recent_commits: $commits,
-              security_scan_results: $security
+              security_scan_results: $security,
+              source: "github_action"
             }' > payload.json
 
           echo "Sending payload to backend..."
-          # POST request to send the generated file, with secret token in the header
           curl -X POST "$WEBHOOK_URL" \
                -H "Content-Type: application/json" \
                -H "Authorization: Bearer $WEBHOOK_TOKEN" \
