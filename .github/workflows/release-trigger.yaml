@@ -1,19 +1,10 @@
 name: AI Release Pipeline Trigger
 
 on:
-  release:
-    types: [published]
-
-  #NOTE: This can be used as different triggering events -> Currently configured to 
-  #send all of the data of commits between releases
-  #pull_request:
-    #types: [opened, synchronize, closed]
-    #branches:
-      #- main
-  #push:
-    #branches:
-      #- main
-  workflow_dispatch: #Makes a button appear on gh so to manually trigger this action
+  push:
+    branches:
+      - '**'
+  workflow_dispatch:
 
 jobs:
   notify-ai-system:
@@ -25,42 +16,99 @@ jobs:
       - name: Code checkout
         uses: actions/checkout@v4
         with:
-          fetch-depth: 0 # Read all of the past commits
+          fetch-depth: 2 # Read the past two commits to calc the diff
 
-      # 2. Extract all of the commits from the latest release 
-      - name: Extract all commits from latest release
-        id: get_commits
+      # 2 Extract commit data
+      - name: Extract Commit Data
+        id: extract_data
         run: |
-          #Search previous' release tag -> If not found return empty
-          PREV_TAG=$(git describe --tags --abbrev=0 HEAD^ 2>/dev/null || echo "")
+          # Branch data
+          BRANCH_NAME=${GITHUB_REF#refs/heads/}
+
+          # Tag Data (if the current commit is related to a tag)
+          TAG_NAME=$(git tag --points-at HEAD || echo "")
           
-          if [ -z "$PREV_TAG" ]; then
-            echo "First release, selecting all commits to date..."
-            COMMITS=$(git log --pretty=format:"%h - %an: %s" --no-merges)
+          # Deduct with priority the devolpment phase from the tags
+          if [[ "$TAG_NAME" == *-rc* || "$TAG_NAME" == *-beta* ]]; then
+            DEV_PHASE="staging/testing"
+          elif [[ "$TAG_NAME" =~ ^v[0-9] ]]; then
+            DEV_PHASE="production-release"
           else
-            echo "Found previous release [$PREV_TAG]. Selecting the new commits..."
-            # Select the commits between the latest and the current release
-            COMMITS=$(git log $PREV_TAG..HEAD --pretty=format:"%h - %an: %s" --no-merges)
+            # Fallback al nome del Branch (Metodo 1)
+            case "$BRANCH_NAME" in
+              "main"|"master")
+                DEV_PHASE="production"
+                ;;
+              "develop"|"dev")
+                DEV_PHASE="development"
+                ;;
+              staging*|release*|rc*)
+                DEV_PHASE="staging"
+                ;;
+              feature*)
+                DEV_PHASE="feature-draft"
+                ;;
+              hotfix*)
+                DEV_PHASE="hotfix-production"
+                ;;
+              *)
+                DEV_PHASE="experimental"
+                ;;
+            esac
+          fi
+
+          if [ -z "$TAG_NAME" ]; then TAG_NAME="no-tag"; fi
+
+          # Author name and message
+          AUTHOR_NAME=$(git log -1 --format='%an')
+          AUTHOR_EMAIL=$(git log -1 --format='%ae')
+          
+          # Role Mock, TODO evaluate if needed
+          if [ "$BRANCH_NAME" == "main" ]; then
+            ROLE="Lead/Production"
+          else
+            ROLE="Developer"
+          fi
+
+          # Diff extraction
+          PREV_SHA=$(git rev-parse HEAD~1 2>/dev/null || echo "")
+          if [ -z "$PREV_SHA" ]; then
+            DIFF_CONTENT="First commit in repository, no previous diff available."
+          else
+            # Limitiamo il diff a 10.000 byte per evitare payload JSON giganteschi
+            DIFF_CONTENT=$(git diff HEAD~1 HEAD | head -c 10000)
           fi
           
-          # Save data locally in env file
+          # Extract commit msg
+          COMMIT_MSG=$(git log -1 --format='%B')
+
           EOF=$(dd if=/dev/urandom bs=15 count=1 status=none | base64)
-          echo "COMMITS<<$EOF" >> $GITHUB_ENV
-          echo "$COMMITS" >> $GITHUB_ENV
+          echo "DIFF_DATA<<$EOF" >> $GITHUB_ENV
+          echo "$DIFF_CONTENT" >> $GITHUB_ENV
           echo "$EOF" >> $GITHUB_ENV
 
-      # 3. Read eventual security reports coming from past pipeline stages
+          EOF_MSG=$(dd if=/dev/urandom bs=15 count=1 status=none | base64)
+          echo "COMMIT_MSG<<$EOF_MSG" >> $GITHUB_ENV
+          echo "$COMMIT_MSG" >> $GITHUB_ENV
+          echo "$EOF_MSG" >> $GITHUB_ENV
+
+          echo "BRANCH_NAME=$BRANCH_NAME" >> $GITHUB_ENV
+          echo "TAG_NAME=$TAG_NAME" >> $GITHUB_ENV
+          echo "AUTHOR_NAME=$AUTHOR_NAME" >> $GITHUB_ENV
+          echo "AUTHOR_EMAIL=$AUTHOR_EMAIL" >> $GITHUB_ENV
+          echo "ROLE=$ROLE" >> $GITHUB_ENV
+          echo "DEV_PHASE=$DEV_PHASE" >> $GITHUB_ENV
+
+      # 3. Read eventual security reports
       - name: Read past stages (eventual) security reports 
         id: read_reports
         run: |
-          # Checks for post stage security report (e.g. Dependabot/Trivy)
           if [ -f "security-report.json" ]; then
             REPORT_CONTENT=$(cat security-report.json)
           else
-            REPORT_CONTENT="No security report produced for this release..."
+            REPORT_CONTENT="No security report produced for this commit..."
           fi
           
-          # Save data locally in env file
           EOF=$(dd if=/dev/urandom bs=15 count=1 status=none | base64)
           echo "SECURITY_REPORT<<$EOF" >> $GITHUB_ENV
           echo "$REPORT_CONTENT" >> $GITHUB_ENV
@@ -72,23 +120,31 @@ jobs:
           WEBHOOK_URL: ${{ secrets.AI_WEBHOOK_URL }}
           WEBHOOK_TOKEN: ${{ secrets.AI_WEBHOOK_SECRET }}
         run: |
-          # Generiamo il JSON
-          # 'project_name' viene preso dal nome della repository (es. "user/repo-name")
-          # 'risk_score' viene mockato a "Pending" o un valore casuale per ora
           jq -n \
             --arg project "${{ github.repository }}" \
-            --arg tag "${{ github.event.release.tag_name || 'manual-trigger' }}" \
-            --arg author "${{ github.actor }}" \
-            --arg commits "$COMMITS" \
+            --arg branch "$BRANCH_NAME" \
+            --arg phase "$DEV_PHASE" \
+            --arg tag "$TAG_NAME" \
+            --arg author_name "$AUTHOR_NAME" \
+            --arg author_email "$AUTHOR_EMAIL" \
+            --arg role "$ROLE" \
+            --arg commit_msg "$COMMIT_MSG" \
+            --arg diff "$DIFF_DATA" \
             --arg security "$SECURITY_REPORT" \
             '{
               project_name: $project,
-              risk_score: "Medium",
-              author: $author,
-              release_tag: $tag,
-              recent_commits: $commits,
+              branch: $branch,
+              development_phase: $phase,
+              phase_tag: $tag,
+              author: {
+                name: $author_name,
+                email: $author_email,
+                role: $role
+              },
+              commit_message: $commit_msg,
+              diff_content: $diff,
               security_scan_results: $security,
-              source: "github_action"
+              source: "github_action_push"
             }' > payload.json
 
           echo "Sending payload to backend..."
