@@ -12,13 +12,13 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      # 1 Checkout code
+      # 1. Checkout code
       - name: Code checkout
         uses: actions/checkout@v4
         with:
-          fetch-depth: 2 # Read the past two commits to calc the diff
+          fetch-depth: 2 # Read the past two commits to calculate the diff
 
-      # 2 Extract commit data
+      # 2. Extract commit data
       - name: Extract Commit Data
         id: extract_data
         run: |
@@ -31,13 +31,13 @@ jobs:
           # Tag Data (if the current commit is related to a tag)
           TAG_NAME=$(git tag --points-at HEAD || echo "")
           
-          # Deduct with priority the devolpment phase from the tags
+          # Deduce the development phase from the tags with priority
           if [[ "$TAG_NAME" == *-rc* || "$TAG_NAME" == *-beta* ]]; then
             DEV_PHASE="staging/testing"
           elif [[ "$TAG_NAME" =~ ^v[0-9] ]]; then
             DEV_PHASE="production-release"
           else
-            # Fallback al nome del Branch (Metodo 1)
+            # Fallback to Branch name (Method 1)
             case "$BRANCH_NAME" in
               "main"|"master")
                 DEV_PHASE="production"
@@ -66,34 +66,50 @@ jobs:
           AUTHOR_NAME=$(git log -1 --format='%an')
           AUTHOR_EMAIL=$(git log -1 --format='%ae')
           
-          # Role Mock, TODO evaluate if needed
+          # Role Mock, TODO: evaluate if needed
           if [ "$BRANCH_NAME" == "main" ]; then
             ROLE="Lead/Production"
           else
             ROLE="Developer"
           fi
 
-          # Diff extraction
-          PREV_SHA=$(git rev-parse HEAD~1 2>/dev/null || echo "")
-          if [ -z "$PREV_SHA" ]; then
-            DIFF_CONTENT="First commit in repository, no previous diff available."
+          # ---------------------------------------------------------
+          # Extract modified/added/deleted files lists
+          # ---------------------------------------------------------
+          if git rev-parse HEAD~1 >/dev/null 2>&1; then
+            ADDED_FILES=$(git diff --name-only --diff-filter=A HEAD~1 HEAD)
+            MODIFIED_FILES=$(git diff --name-only --diff-filter=M HEAD~1 HEAD)
+            DELETED_FILES=$(git diff --name-only --diff-filter=D HEAD~1 HEAD)
           else
-            # Limitiamo il diff a 10.000 byte per evitare payload JSON giganteschi
-            DIFF_CONTENT=$(git diff HEAD~1 HEAD | head -c 10000)
+            # First commit in repository: consider all tracked files as added
+            ADDED_FILES=$(git ls-tree -r HEAD --name-only)
+            MODIFIED_FILES=""
+            DELETED_FILES=""
           fi
           
           # Extract commit msg
           COMMIT_MSG=$(git log -1 --format='%B')
 
-          EOF=$(dd if=/dev/urandom bs=15 count=1 status=none | base64)
-          echo "DIFF_DATA<<$EOF" >> $GITHUB_ENV
-          echo "$DIFF_CONTENT" >> $GITHUB_ENV
-          echo "$EOF" >> $GITHUB_ENV
-
+          # Securely inject multiline strings into Github Environment
           EOF_MSG=$(dd if=/dev/urandom bs=15 count=1 status=none | base64)
           echo "COMMIT_MSG<<$EOF_MSG" >> $GITHUB_ENV
           echo "$COMMIT_MSG" >> $GITHUB_ENV
           echo "$EOF_MSG" >> $GITHUB_ENV
+
+          EOF_ADDED=$(dd if=/dev/urandom bs=15 count=1 status=none | base64)
+          echo "ADDED_FILES<<$EOF_ADDED" >> $GITHUB_ENV
+          echo "$ADDED_FILES" >> $GITHUB_ENV
+          echo "$EOF_ADDED" >> $GITHUB_ENV
+
+          EOF_MODIFIED=$(dd if=/dev/urandom bs=15 count=1 status=none | base64)
+          echo "MODIFIED_FILES<<$EOF_MODIFIED" >> $GITHUB_ENV
+          echo "$MODIFIED_FILES" >> $GITHUB_ENV
+          echo "$EOF_MODIFIED" >> $GITHUB_ENV
+
+          EOF_DELETED=$(dd if=/dev/urandom bs=15 count=1 status=none | base64)
+          echo "DELETED_FILES<<$EOF_DELETED" >> $GITHUB_ENV
+          echo "$DELETED_FILES" >> $GITHUB_ENV
+          echo "$EOF_DELETED" >> $GITHUB_ENV
 
           echo "BRANCH_NAME=$BRANCH_NAME" >> $GITHUB_ENV
           echo "TAG_NAME=$TAG_NAME" >> $GITHUB_ENV
@@ -123,17 +139,20 @@ jobs:
           WEBHOOK_URL: ${{ secrets.AI_WEBHOOK_URL }}
           WEBHOOK_TOKEN: ${{ secrets.AI_WEBHOOK_SECRET }}
         run: |
+          # We use jq split to convert bash multiline strings into JSON arrays
           jq -n \
             --arg project "${{ github.repository }}" \
             --arg branch "$BRANCH_NAME" \
-            --arg sha "$COMMIT_SHA" \
+            --arg sha "$GITHUB_SHA" \
             --arg phase "$DEV_PHASE" \
             --arg tag "$TAG_NAME" \
             --arg author_name "$AUTHOR_NAME" \
             --arg author_email "$AUTHOR_EMAIL" \
             --arg role "$ROLE" \
             --arg commit_msg "$COMMIT_MSG" \
-            --arg diff "$DIFF_DATA" \
+            --arg added "$ADDED_FILES" \
+            --arg modified "$MODIFIED_FILES" \
+            --arg deleted "$DELETED_FILES" \
             --arg security "$SECURITY_REPORT" \
             '{
               project_name: $project,
@@ -147,7 +166,11 @@ jobs:
                 role: $role
               },
               commit_message: $commit_msg,
-              diff_content: $diff,
+              files: {
+                added: ($added | split("\n") | map(select(length > 0))),
+                modified: ($modified | split("\n") | map(select(length > 0))),
+                deleted: ($deleted | split("\n") | map(select(length > 0)))
+              },
               security_scan_results: $security,
               source: "github_action_push"
             }' > payload.json
