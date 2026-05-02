@@ -78,7 +78,7 @@ jobs:
           # ---------------------------------------------------------
           if git rev-parse HEAD~1 >/dev/null 2>&1; then
             ADDED_FILES=$(git diff --name-only --diff-filter=A HEAD~1 HEAD)
-            MODIFIED_FILES=$(git diff --name-only --diff-filter=M HEAD~1 HEAD)
+            MODIFIED_FILES=$(git diff --name-only --diff-filter=MRC HEAD~1 HEAD)
             DELETED_FILES=$(git diff --name-only --diff-filter=D HEAD~1 HEAD)
           else
             # First commit in repository: consider all tracked files as added
